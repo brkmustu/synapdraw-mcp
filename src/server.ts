@@ -394,11 +394,24 @@ Use the Primary Colors from above — they're bright enough on dark backgrounds.
 - cameraUpdate is MAGICAL and users love it! please use it a lot to guide the user's attention as you draw. It makes a huge difference in readability and engagement.
 `;
 
+export type BroadcastEvent =
+  | { type: "mermaid"; code: string; title?: string; mode?: "replace" | "append"; checkpointId?: string }
+  | { type: "html"; html: string; title?: string; mode?: "replace" | "append"; checkpointId?: string }
+  | { type: "elements"; elements: any[]; checkpointId?: string; mode?: "replace" | "append" }
+  | { type: "clear" };
+
+export type BroadcastHandler = (event: BroadcastEvent) => void | Promise<void>;
+
 /**
  * Registers all Excalidraw tools and resources on the given McpServer.
  * Shared between local (main.ts) and Vercel (api/mcp.ts) entry points.
  */
-export function registerTools(server: McpServer, distDir: string, store: CheckpointStore): void {
+export function registerTools(
+  server: McpServer,
+  distDir: string,
+  store: CheckpointStore,
+  onBroadcast?: BroadcastHandler,
+): void {
   const resourceUri = "ui://excalidraw/mcp-app.html";
 
   // ============================================================
@@ -416,14 +429,166 @@ export function registerTools(server: McpServer, distDir: string, store: Checkpo
   );
 
   // ============================================================
-  // Tool 2: create_view (Excalidraw SVG)
+  // Tool 2: render_mermaid (RECOMMENDED for 14B models & fast diagrams)
+  // ============================================================
+  server.registerTool(
+    "render_mermaid",
+    {
+      title: "Render Mermaid Diagram to Live Canvas",
+      description: `Renders a diagram from Mermaid.js syntax (flowchart, sequenceDiagram, classDiagram, stateDiagram, erDiagram, mindmap) directly onto the live Excalidraw canvas at http://localhost:3000.
+This is the RECOMMENDED tool for system architectures, workflows, sequence diagrams, and clean graphs.
+Example syntax:
+graph TD
+  User([User]) --> APIGW[API Gateway]
+  APIGW --> AuthSvc[Auth Service]
+  APIGW --> OrderSvc[Order Service]
+  OrderSvc --> DB[(PostgreSQL)]`,
+      inputSchema: z.object({
+        code: z.string().describe("Mermaid diagram definition (e.g. 'graph TD\\n  A --> B')"),
+        title: z.string().optional().describe("Optional title for the diagram"),
+        mode: z.enum(["replace", "append"]).optional().default("replace").describe("Whether to replace the canvas content or append to it (default: replace)"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ code, title, mode = "replace" }): Promise<CallToolResult> => {
+      const cleanCode = code.replace(/^```(mermaid)?/m, "").replace(/```$/m, "").trim();
+      const checkpointId = crypto.randomUUID().replace(/-/g, "").slice(0, 18);
+      await store.save(checkpointId, { elements: [{ type: "mermaid_raw", code: cleanCode, title }] });
+
+      if (onBroadcast) {
+        try {
+          await onBroadcast({ type: "mermaid", code: cleanCode, title, mode, checkpointId });
+        } catch (err) {
+          console.error("Broadcast failed:", err);
+        }
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: `Success! Mermaid diagram was rendered to the live Excalidraw canvas (http://localhost:3000).
+Checkpoint id: "${checkpointId}". Mode: ${mode}.
+The user can now view, interact with, and edit the hand-drawn diagram in real time on their browser canvas.`
+        }],
+        structuredContent: { checkpointId, type: "mermaid" },
+      };
+    },
+  );
+
+  // ============================================================
+  // Tool: render_html (UI Wireframe Studio)
+  // ============================================================
+  server.registerTool(
+    "render_html",
+    {
+      title: "Render HTML/CSS Wireframe to Live Canvas",
+      description: `Renders an interactive UI Wireframe from modern semantic HTML & CSS snippets (forms, cards, buttons, navbars, tables) directly onto the live Excalidraw canvas at http://localhost:3000.
+Elements are parsed and laid out cleanly as hand-drawn editable Excalidraw components with smart non-overlapping placement.
+Example:
+<div class="card" style="width: 360px; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
+  <h2>Giriş Yap</h2>
+  <label>E-posta</label>
+  <input type="email" placeholder="ornek@sirket.com" />
+  <button style="width: 100%; background: #3b82f6; color: white;">Giriş Yap</button>
+</div>`,
+      inputSchema: z.object({
+        html: z.string().describe("Semantic HTML snippet (with optional inline CSS or classes)"),
+        title: z.string().optional().describe("Optional title for the wireframe frame"),
+        mode: z.enum(["replace", "append"]).optional().default("append").describe("Whether to replace the canvas content or append next to existing elements (default: append)"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ html, title, mode = "append" }): Promise<CallToolResult> => {
+      const cleanHtml = html.replace(/^```(html)?/m, "").replace(/```$/m, "").trim();
+      const checkpointId = crypto.randomUUID().replace(/-/g, "").slice(0, 18);
+      await store.save(checkpointId, { elements: [{ type: "html_raw", html: cleanHtml, title }] });
+
+      if (onBroadcast) {
+        try {
+          await onBroadcast({ type: "html", html: cleanHtml, title, mode, checkpointId });
+        } catch (err) {
+          console.error("Broadcast failed:", err);
+        }
+      }
+
+      return {
+        content: [{
+          type: "text",
+          text: `Success! HTML UI wireframe was rendered to the live Excalidraw canvas (http://localhost:3000).
+Checkpoint id: "${checkpointId}". Mode: ${mode}.
+The user can now view, rearrange, and edit the UI elements directly in their browser.`
+        }],
+        structuredContent: { checkpointId, type: "html" },
+      };
+    },
+  );
+
+  // ============================================================
+  // Tool: get_canvas_context (Reads current canvas state & selection)
+  // ============================================================
+  server.registerTool(
+    "get_canvas_context",
+    {
+      title: "Get Live Canvas Semantic Context",
+      description: "Retrieves the current semantic state of the live Excalidraw canvas (number of elements, bounding boxes, list of cards/buttons/inputs/connectors, and user selection). Use this before modifying or adding to existing canvas designs.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async (): Promise<CallToolResult> => {
+      try {
+        const res = await fetch("http://localhost:3001/api/canvas-context");
+        if (res.ok) {
+          const data = await res.json();
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify(data, null, 2),
+            }],
+            structuredContent: data,
+          };
+        }
+      } catch {}
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ totalElements: 0, nodes: [], note: "Canvas is empty or context sync is pending." }),
+        }],
+      };
+    },
+  );
+
+  // ============================================================
+  // Tool 3: clear_canvas (Clears live canvas)
+  // ============================================================
+  server.registerTool(
+    "clear_canvas",
+    {
+      title: "Clear Live Canvas",
+      description: "Clears all elements from the live Excalidraw canvas at http://localhost:3000.",
+      annotations: { readOnlyHint: false },
+    },
+    async (): Promise<CallToolResult> => {
+      if (onBroadcast) {
+        try {
+          await onBroadcast({ type: "clear" });
+        } catch (err) {}
+      }
+      return {
+        content: [{ type: "text", text: "Canvas cleared successfully on http://localhost:3000." }],
+      };
+    },
+  );
+
+  // ============================================================
+  // Tool 4: create_view (Excalidraw SVG)
   // ============================================================
   registerAppTool(server,
     "create_view",
     {
       title: "Draw Diagram",
       description: `Renders a hand-drawn diagram using Excalidraw elements.
-Elements stream in one by one with draw-on animations.
+Elements stream in one by one with draw-on animations and update the live canvas at http://localhost:3000.
 Call read_me first to learn the element format.`,
       inputSchema: z.object({
         elements: z.string().describe(
@@ -494,8 +659,17 @@ Call read_me first to learn the element format.`,
 
       const checkpointId = crypto.randomUUID().replace(/-/g, "").slice(0, 18);
       await store.save(checkpointId, { elements: resolvedElements });
+
+      if (onBroadcast) {
+        try {
+          await onBroadcast({ type: "elements", elements: resolvedElements, checkpointId });
+        } catch (err) {
+          console.error("Broadcast elements failed:", err);
+        }
+      }
+
       return {
-        content: [{ type: "text", text: `Diagram displayed! Checkpoint id: "${checkpointId}".
+        content: [{ type: "text", text: `Diagram displayed and synced to live canvas! Checkpoint id: "${checkpointId}".
 If user asks to create a new diagram - simply create a new one from scratch.
 However, if the user wants to edit something on this diagram "${checkpointId}", take these steps:
 1) read widget context (using read_widget_context tool) to check if user made any manual edits first
@@ -686,11 +860,11 @@ However, if the user wants to edit something on this diagram "${checkpointId}", 
  * Creates a new MCP server instance with Excalidraw drawing tools.
  * Used by local entry point (main.ts) and Docker deployments.
  */
-export function createServer(store: CheckpointStore): McpServer {
+export function createServer(store: CheckpointStore, onBroadcast?: BroadcastHandler): McpServer {
   const server = new McpServer({
     name: "Excalidraw",
-    version: "1.0.0",
+    version: "1.1.0",
   });
-  registerTools(server, DIST_DIR, store);
+  registerTools(server, DIST_DIR, store, onBroadcast);
   return server;
 }

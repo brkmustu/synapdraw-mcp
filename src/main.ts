@@ -1,7 +1,7 @@
 /**
- * Entry point for running the MCP server.
- * Run with: npx @mcp-demos/excalidraw-server
- * Or: node dist/index.js [--stdio]
+ * Entry point for running the Excalidraw Live MCP server.
+ * Run with: node dist/index.js [--stdio]
+ * Provides both MCP tools and a Live Sync SSE Hub for Excalidraw web app (port 3000).
  */
 
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -9,25 +9,112 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import cors from "cors";
+import express from "express";
 import type { Request, Response } from "express";
 import { FileCheckpointStore } from "./checkpoint-store.js";
-import { createServer } from "./server.js";
+import { createServer, type BroadcastEvent } from "./server.js";
+
+const DEFAULT_PORT = 3001;
+const sseClients = new Set<Response>();
+let latestEvent: BroadcastEvent | null = null;
 
 /**
- * Starts an MCP server with Streamable HTTP transport in stateless mode.
- *
- * @param createServer - Factory function that creates a new McpServer instance per request.
+ * Broadcasts an event to all connected browser tabs via SSE.
  */
-export async function startStreamableHTTPServer(
-  createServer: () => McpServer,
-): Promise<void> {
-  const port = parseInt(process.env.PORT ?? "3001", 10);
+export function broadcastToBrowserClients(event: BroadcastEvent) {
+  latestEvent = event;
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
 
+/**
+ * Sends broadcast event locally or to a running HTTP sync server on port 3001.
+ */
+async function dispatchBroadcast(event: BroadcastEvent) {
+  // 1. Broadcast to our own in-process clients
+  broadcastToBrowserClients(event);
+
+  // 2. Also forward to port 3001 if another process is hosting the SSE server
+  try {
+    const port = process.env.PORT ?? DEFAULT_PORT;
+    await fetch(`http://localhost:${port}/api/broadcast`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(event),
+    });
+  } catch {
+    // Port 3001 might not be listening in external process, which is totally normal
+  }
+}
+
+/**
+ * Builds the Express app with MCP transport and Live Sync SSE Hub endpoints.
+ */
+function buildApp(factory: () => McpServer) {
   const app = createMcpExpressApp({ host: "0.0.0.0" });
   app.use(cors());
+  app.use(express.json({ limit: "10mb" }));
 
+  // SSE Live stream for browser tabs
+  app.get("/api/live-events", (req: Request, res: Response) => {
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+
+    // Handshake
+    res.write(`data: ${JSON.stringify({ type: "connected", timestamp: Date.now() })}\n\n`);
+    sseClients.add(res);
+
+    req.on("close", () => {
+      sseClients.delete(res);
+    });
+  });
+
+  // Broadcast endpoint
+  app.post("/api/broadcast", (req: Request, res: Response) => {
+    if (req.body && req.body.type) {
+      broadcastToBrowserClients(req.body);
+    }
+    res.json({ ok: true, clientCount: sseClients.size });
+  });
+
+  // Status endpoint
+  app.get("/api/status", (_req: Request, res: Response) => {
+    res.json({
+      status: "ok",
+      clientCount: sseClients.size,
+      latestEventType: latestEvent?.type ?? null,
+      timestamp: Date.now(),
+    });
+  });
+
+  // Latest event endpoint
+  app.get("/api/latest", (_req: Request, res: Response) => {
+    res.json(latestEvent ?? { type: "none" });
+  });
+
+  // Live Canvas Context cache
+  let latestCanvasContext: any = { totalElements: 0, nodes: [] };
+
+  app.post("/api/canvas-context", (req: Request, res: Response) => {
+    latestCanvasContext = req.body;
+    res.json({ ok: true });
+  });
+
+  app.get("/api/canvas-context", (_req: Request, res: Response) => {
+    res.json(latestCanvasContext);
+  });
+
+  // MCP Streamable HTTP endpoint
   app.all("/mcp", async (req: Request, res: Response) => {
-    const server = createServer();
+    const server = factory();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
@@ -52,12 +139,29 @@ export async function startStreamableHTTPServer(
     }
   });
 
-  const httpServer = app.listen(port, (err) => {
-    if (err) {
-      console.error("Failed to start server:", err);
-      process.exit(1);
+  return app;
+}
+
+/**
+ * Starts an MCP server with Streamable HTTP transport and Live Sync endpoints.
+ */
+export async function startStreamableHTTPServer(
+  factory: () => McpServer,
+): Promise<void> {
+  const port = parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
+  const app = buildApp(factory);
+
+  const httpServer = app.listen(port, () => {
+    console.log(`[Excalidraw Live MCP] Server listening on http://localhost:${port}/mcp`);
+    console.log(`[Excalidraw Live Sync] SSE stream active at http://localhost:${port}/api/live-events`);
+  });
+
+  httpServer.on("error", (err: any) => {
+    if (err.code === "EADDRINUSE") {
+      console.warn(`[Excalidraw Live MCP] Port ${port} is already in use by another instance.`);
+    } else {
+      console.error("[Excalidraw Live MCP] Server error:", err);
     }
-    console.log(`MCP server listening on http://localhost:${port}/mcp`);
   });
 
   const shutdown = () => {
@@ -70,19 +174,31 @@ export async function startStreamableHTTPServer(
 }
 
 /**
- * Starts an MCP server with stdio transport.
- *
- * @param createServer - Factory function that creates a new McpServer instance.
+ * Starts an MCP server with stdio transport while launching the Live Sync hub in background.
  */
 export async function startStdioServer(
-  createServer: () => McpServer,
+  factory: () => McpServer,
 ): Promise<void> {
-  await createServer().connect(new StdioServerTransport());
+  // In stdio mode, start background HTTP server for the browser if port is available
+  try {
+    const port = parseInt(process.env.PORT ?? String(DEFAULT_PORT), 10);
+    const app = buildApp(factory);
+    const server = app.listen(port, () => {
+      // Suppress stdout logging in stdio mode so as not to corrupt JSON-RPC stream
+    });
+    server.on("error", () => {
+      // Already running in another process, no problem
+    });
+  } catch {}
+
+  const server = factory();
+  await server.connect(new StdioServerTransport());
 }
 
 async function main() {
   const store = new FileCheckpointStore();
-  const factory = () => createServer(store);
+  const factory = () => createServer(store, dispatchBroadcast);
+
   if (process.argv.includes("--stdio")) {
     await startStdioServer(factory);
   } else {
@@ -94,3 +210,4 @@ main().catch((e) => {
   console.error(e);
   process.exit(1);
 });
+
