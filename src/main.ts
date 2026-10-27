@@ -4,13 +4,12 @@
  * Provides both MCP tools and a Live Sync SSE Hub for Excalidraw web app (port 3000).
  */
 
-import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import cors from "cors";
 import express from "express";
-import type { Request, Response } from "express";
+import type { Request, Response, NextFunction } from "express";
 import { FileCheckpointStore } from "./checkpoint-store.js";
 import { createServer, type BroadcastEvent } from "./server.js";
 
@@ -57,9 +56,19 @@ async function dispatchBroadcast(event: BroadcastEvent) {
  * Builds the Express app with MCP transport and Live Sync SSE Hub endpoints.
  */
 function buildApp(factory: () => McpServer) {
-  const app = createMcpExpressApp({ host: "0.0.0.0" });
+  const app = express();
   app.use(cors());
-  app.use(express.json({ limit: "10mb" }));
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
   // SSE Live stream for browser tabs
   app.get("/api/live-events", (req: Request, res: Response) => {
