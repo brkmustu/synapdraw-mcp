@@ -398,6 +398,8 @@ export type BroadcastEvent =
   | { type: "mermaid"; code: string; title?: string; mode?: "replace" | "append"; locked?: boolean; checkpointId?: string }
   | { type: "html"; html: string; title?: string; mode?: "replace" | "append"; locked?: boolean; checkpointId?: string }
   | { type: "elements"; elements: any[]; checkpointId?: string; mode?: "replace" | "append" }
+  | { type: "design"; html: string; css?: string; title?: string; artboardId?: string; width?: number; height?: number; mode?: "desktop" | "mobile" }
+  | { type: "artboard"; name?: string; width?: number; height?: number; locked?: boolean; allowMove?: boolean; html?: string; css?: string }
   | { type: "clear" };
 
 export type BroadcastHandler = (event: BroadcastEvent) => void | Promise<void>;
@@ -557,6 +559,141 @@ The user can now view, rearrange, and edit the UI elements directly in their bro
           text: JSON.stringify({ totalElements: 0, nodes: [], note: "Canvas is empty or context sync is pending." }),
         }],
       };
+    },
+  );
+
+  // ============================================================
+  // Tool: get_canvas_type (Reads active workspace and canvas type)
+  // ============================================================
+  server.registerTool(
+    "get_canvas_type",
+    {
+      title: "Get Active Canvas Type",
+      description: "Returns the active workspace ID, document name, and canvas type ('sketch' for Excalidraw, 'design' for Pixel-Perfect CSS Design Canvas). Call this to know which canvas mode the user has selected.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async (): Promise<CallToolResult> => {
+      try {
+        const res = await fetch("http://localhost:3001/api/canvas-context");
+        if (res.ok) {
+          const data = await res.json();
+          const canvasType = data.canvasType || "sketch";
+          const workspaceName = data.workspaceName || (canvasType === "design" ? "Tasarım" : "Çizim");
+          const workspaceId = data.workspaceId || "ws_default_sketch";
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ canvasType, workspaceId, workspaceName }, null, 2),
+            }],
+            structuredContent: { canvasType, workspaceId, workspaceName },
+          };
+        }
+      } catch {}
+
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ canvasType: "sketch", workspaceId: "default", workspaceName: "Çizim 1" }),
+        }],
+      };
+    },
+  );
+
+  // ============================================================
+  // Tool: render_design (Direct HTML/CSS rendering to Design Canvas)
+  // ============================================================
+  server.registerTool(
+    "render_design",
+    {
+      title: "Render Pixel-Perfect Design to Design Canvas",
+      description: `Renders modern, pixel-perfect HTML/CSS directly onto the Design Canvas (Tasarım Tuvali).
+Use this tool when the active canvas type is 'design' (or when generating Figma-like pixel-perfect web UI, landing pages, forms, cards, dashboards).
+Supports custom CSS, flexbox, CSS grid, Google Fonts, and modern CSS variables.
+Renders inside isolated Shadow DOM so external styles never leak.`,
+      inputSchema: z.object({
+        html: z.string().describe("HTML markup of the component or page"),
+        css: z.string().optional().describe("Optional CSS rules, classes, and styles"),
+        title: z.string().optional().describe("Title or name for the component/design (e.g. 'Hero Section', 'SaaS Pricing Card')"),
+        artboardId: z.string().optional().describe("Optional target Artboard ID to update in-place"),
+        width: z.number().optional().describe("Optional fixed width in pixels. If omitted, Hug Contents (natural CSS auto width) is used"),
+        height: z.number().optional().describe("Optional fixed height in pixels. If omitted, Hug Contents (natural CSS auto height) is used"),
+        mode: z.enum(["desktop", "mobile"]).optional().describe("Optional preset device constraint (e.g. 'mobile' for 390px)"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ html, css, title, artboardId, width, height, mode }): Promise<CallToolResult> => {
+      try {
+        if (onBroadcast) {
+          await onBroadcast({
+            type: "design",
+            html,
+            css,
+            title,
+            artboardId,
+            width,
+            height,
+            mode,
+          });
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: `Tasarım başarıyla Tasarım Tuvaline aktarıldı (${title || "Artboard"}). Canlı olarak http://localhost:3000 adresinde görüntülenebilir.`,
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Aktarım başarısız: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  // ============================================================
+  // Tool: create_artboard (Creates named artboard on Design Canvas)
+  // ============================================================
+  server.registerTool(
+    "create_artboard",
+    {
+      title: "Create Artboard on Design Canvas",
+      description: "Creates a new named Artboard container on the Design Canvas with specific pixel dimensions (e.g., 1440x900 desktop, 390x844 mobile).",
+      inputSchema: z.object({
+        name: z.string().describe("Name of the artboard (e.g. 'Desktop Landing', 'Mobile Navigation')"),
+        width: z.number().default(1440).describe("Width in pixels (default: 1440)"),
+        height: z.number().default(900).describe("Height in pixels (default: 900)"),
+        locked: z.boolean().optional().default(false).describe("Whether the artboard is initially locked"),
+        allowMove: z.boolean().optional().default(false).describe("Whether the artboard can be dragged while preserving child locking"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ name, width, height, locked, allowMove }): Promise<CallToolResult> => {
+      try {
+        if (onBroadcast) {
+          await onBroadcast({
+            type: "artboard",
+            name,
+            width,
+            height,
+            locked,
+            allowMove,
+          });
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: `Yeni Artboard oluşturuldu: "${name}" (${width}×${height}px).`,
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Artboard oluşturulamadı: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
     },
   );
 
