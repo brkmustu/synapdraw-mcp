@@ -395,8 +395,8 @@ Use the Primary Colors from above — they're bright enough on dark backgrounds.
 `;
 
 export type BroadcastEvent =
-  | { type: "mermaid"; code: string; title?: string; mode?: "replace" | "append"; checkpointId?: string }
-  | { type: "html"; html: string; title?: string; mode?: "replace" | "append"; checkpointId?: string }
+  | { type: "mermaid"; code: string; title?: string; mode?: "replace" | "append"; locked?: boolean; checkpointId?: string }
+  | { type: "html"; html: string; title?: string; mode?: "replace" | "append"; locked?: boolean; checkpointId?: string }
   | { type: "elements"; elements: any[]; checkpointId?: string; mode?: "replace" | "append" }
   | { type: "clear" };
 
@@ -447,17 +447,18 @@ graph TD
         code: z.string().describe("Mermaid diagram definition (e.g. 'graph TD\\n  A --> B')"),
         title: z.string().optional().describe("Optional title for the diagram"),
         mode: z.enum(["replace", "append"]).optional().default("replace").describe("Whether to replace the canvas content or append to it (default: replace)"),
+        locked: z.boolean().optional().default(false).describe("Whether the diagram container and elements should be initially locked (default: false)"),
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ code, title, mode = "replace" }): Promise<CallToolResult> => {
+    async ({ code, title, mode = "replace", locked = false }): Promise<CallToolResult> => {
       const cleanCode = code.replace(/^```(mermaid)?/m, "").replace(/```$/m, "").trim();
       const checkpointId = crypto.randomUUID().replace(/-/g, "").slice(0, 18);
       await store.save(checkpointId, { elements: [{ type: "mermaid_raw", code: cleanCode, title }] });
 
       if (onBroadcast) {
         try {
-          await onBroadcast({ type: "mermaid", code: cleanCode, title, mode, checkpointId });
+          await onBroadcast({ type: "mermaid", code: cleanCode, title, mode, locked, checkpointId });
         } catch (err) {
           console.error("Broadcast failed:", err);
         }
@@ -495,17 +496,18 @@ Example:
         html: z.string().describe("Semantic HTML snippet (with optional inline CSS or classes)"),
         title: z.string().optional().describe("Optional title for the wireframe frame"),
         mode: z.enum(["replace", "append"]).optional().default("append").describe("Whether to replace the canvas content or append next to existing elements (default: append)"),
+        locked: z.boolean().optional().default(false).describe("Whether the wireframe container and elements should be initially locked (default: false)"),
       }),
       annotations: { readOnlyHint: false },
     },
-    async ({ html, title, mode = "append" }): Promise<CallToolResult> => {
+    async ({ html, title, mode = "append", locked = false }): Promise<CallToolResult> => {
       const cleanHtml = html.replace(/^```(html)?/m, "").replace(/```$/m, "").trim();
       const checkpointId = crypto.randomUUID().replace(/-/g, "").slice(0, 18);
       await store.save(checkpointId, { elements: [{ type: "html_raw", html: cleanHtml, title }] });
 
       if (onBroadcast) {
         try {
-          await onBroadcast({ type: "html", html: cleanHtml, title, mode, checkpointId });
+          await onBroadcast({ type: "html", html: cleanHtml, title, mode, locked, checkpointId });
         } catch (err) {
           console.error("Broadcast failed:", err);
         }
