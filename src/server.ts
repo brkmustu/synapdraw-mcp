@@ -401,6 +401,9 @@ export type BroadcastEvent =
   | { type: "design"; html: string; css?: string; title?: string; artboardId?: string; width?: number; height?: number; mode?: "desktop" | "mobile" | "append" | "replace"; locked?: boolean }
   | { type: "update_node_styles"; artboardId?: string; selector: string; styles: Record<string, string>; textContent?: string }
   | { type: "artboard"; name?: string; width?: number; height?: number; locked?: boolean; allowMove?: boolean; html?: string; css?: string }
+  | { type: "sdlc_upsert_task"; task: Record<string, any> }
+  | { type: "sdlc_upsert_tdd"; scenario: Record<string, any> }
+  | { type: "sdlc_generate_tdd"; taskId: string }
   | { type: "clear" };
 
 export type BroadcastHandler = (event: BroadcastEvent) => void | Promise<void>;
@@ -813,6 +816,152 @@ Renders inside isolated Shadow DOM so external styles never leak.`,
       return {
         content: [{ type: "text", text: "Tasarım kodu alınamadı." }],
         isError: true,
+      };
+    },
+  );
+
+  // ============================================================
+  // SDLC Super-App Tools: Project Overview, Tasks, and TDD
+  // ============================================================
+  server.registerTool(
+    "get_project_sdlc_overview",
+    {
+      title: "Get Project SDLC Overview (Canvases, Tasks, TDD Scenarios, Team)",
+      description:
+        "Returns the complete Software Development Lifecycle (SDLC) overview for the active project, including all analysis/architecture/UI canvases, project tasks, TDD test scenarios, and human + AI agent team members.",
+      inputSchema: z.object({}),
+      annotations: { readOnlyHint: true },
+    },
+    async (): Promise<CallToolResult> => {
+      try {
+        const res = await fetch("http://localhost:3001/api/canvas-context");
+        if (res.ok) {
+          const data = await res.json();
+          const overview = data.sdlcOverview || {
+            canvasType: data.canvasType,
+            workspaceId: data.workspaceId,
+            workspaceName: data.workspaceName,
+            note: "SDLC overview will populate once the browser syncs.",
+          };
+          return {
+            content: [{ type: "text", text: JSON.stringify(overview, null, 2) }],
+          };
+        }
+      } catch {}
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              note: "Live browser context not yet connected on port 3001.",
+            }),
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "upsert_project_task",
+    {
+      title: "Create or Update Project Task (SDLC Kanban Board)",
+      description:
+        "Creates a new task or updates an existing task in the active project's SDLC Task Board, with optional cross-links to analysis/architecture/design canvases and TDD test scenarios.",
+      inputSchema: z.object({
+        id: z
+          .string()
+          .optional()
+          .describe("Task ID to update (e.g. 'TASK-101'). Omit to create a new task."),
+        title: z.string().describe("Task title"),
+        description: z.string().optional().describe("Detailed task description"),
+        status: z
+          .enum(["todo", "in_progress", "review", "done"])
+          .optional()
+          .default("todo")
+          .describe("Kanban status column"),
+        priority: z
+          .enum(["low", "medium", "high", "critical"])
+          .optional()
+          .default("medium")
+          .describe("Task priority"),
+        assigneeId: z
+          .string()
+          .optional()
+          .describe("ID of human or AI agent team member (e.g. 'agent_dev', 'member_dev')"),
+        linkedDocumentIds: z
+          .array(z.string())
+          .optional()
+          .describe("Workspace document IDs (analysis, architecture, UI design) linked to this task"),
+        linkedScenarioIds: z
+          .array(z.string())
+          .optional()
+          .describe("TDD scenario IDs linked to this task"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async (taskInput): Promise<CallToolResult> => {
+      if (onBroadcast) {
+        await onBroadcast({
+          type: "sdlc_upsert_task",
+          task: taskInput,
+        });
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `SDLC Görevi senkronize edildi: "${taskInput.title}" (${taskInput.status || "todo"}).`,
+          },
+        ],
+      };
+    },
+  );
+
+  server.registerTool(
+    "upsert_tdd_scenario",
+    {
+      title: "Create or Update TDD / BDD Test Scenario",
+      description:
+        "Creates or updates a BDD (Given/When/Then) & TDD (Red -> Green -> Refactor) test scenario in the active project's TDD Studio, linked to project tasks and canvases.",
+      inputSchema: z.object({
+        id: z
+          .string()
+          .optional()
+          .describe("Scenario ID to update (e.g. 'TDD-01'). Omit to create a new scenario."),
+        title: z.string().describe("Test scenario title"),
+        given: z.string().describe("BDD Given precondition"),
+        when: z.string().describe("BDD When action/trigger"),
+        then: z.string().describe("BDD Then expected outcome"),
+        status: z
+          .enum(["red", "green", "refactor", "draft"])
+          .optional()
+          .default("red")
+          .describe("TDD cycle state: 'red' (failing), 'green' (passing), 'refactor', or 'draft'"),
+        linkedTaskId: z
+          .string()
+          .optional()
+          .describe("Optional Task ID this test scenario verifies (e.g. 'TASK-101')"),
+        linkedDocumentId: z
+          .string()
+          .optional()
+          .describe("Optional Canvas Document ID this test scenario covers"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async (scenarioInput): Promise<CallToolResult> => {
+      if (onBroadcast) {
+        await onBroadcast({
+          type: "sdlc_upsert_tdd",
+          scenario: scenarioInput,
+        });
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `TDD Test Senaryosu senkronize edildi: "${scenarioInput.title}" [${(scenarioInput.status || "red").toUpperCase()}].`,
+          },
+        ],
       };
     },
   );
