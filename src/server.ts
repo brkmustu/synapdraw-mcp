@@ -398,7 +398,8 @@ export type BroadcastEvent =
   | { type: "mermaid"; code: string; title?: string; mode?: "replace" | "append"; locked?: boolean; checkpointId?: string }
   | { type: "html"; html: string; title?: string; mode?: "replace" | "append"; locked?: boolean; checkpointId?: string }
   | { type: "elements"; elements: any[]; checkpointId?: string; mode?: "replace" | "append" }
-  | { type: "design"; html: string; css?: string; title?: string; artboardId?: string; width?: number; height?: number; mode?: "desktop" | "mobile" }
+  | { type: "design"; html: string; css?: string; title?: string; artboardId?: string; width?: number; height?: number; mode?: "desktop" | "mobile" | "append" | "replace"; locked?: boolean }
+  | { type: "update_node_styles"; artboardId?: string; selector: string; styles: Record<string, string>; textContent?: string }
   | { type: "artboard"; name?: string; width?: number; height?: number; locked?: boolean; allowMove?: boolean; html?: string; css?: string }
   | { type: "clear" };
 
@@ -698,6 +699,124 @@ Renders inside isolated Shadow DOM so external styles never leak.`,
   );
 
   // ============================================================
+  server.registerTool(
+    "get_design_tree",
+    {
+      title: "Get Design Canvas DOM Tree & Computed Styles",
+      description: "Returns the list of artboards on the Design Canvas along with their measured bounding boxes, node IDs (data-node-id), DOM hierarchy, and computed CSS styles.",
+      inputSchema: z.object({
+        artboardId: z.string().optional().describe("Optional Artboard ID to filter the tree"),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ artboardId }): Promise<CallToolResult> => {
+      try {
+        const res = await fetch("http://localhost:3001/api/canvas-context");
+        if (res.ok) {
+          const data = await res.json();
+          const artboards = Array.isArray(data.artboards) ? data.artboards : [];
+          const filtered = artboardId
+            ? artboards.filter((a: any) => a.id === artboardId)
+            : artboards;
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({
+                canvasType: data.canvasType || "design",
+                selectedArtboardId: data.selectedArtboardId,
+                selectedNodeId: data.selectedNodeId,
+                artboards: filtered,
+              }, null, 2),
+            }],
+          };
+        }
+      } catch {}
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ artboards: [], note: "Design Canvas context unavailable." }),
+        }],
+      };
+    },
+  );
+
+  server.registerTool(
+    "update_node_styles",
+    {
+      title: "Update Node CSS Styles on Design Canvas",
+      description: "Updates inline CSS properties (and optionally text content) of a specific DOM node inside an Artboard on the Design Canvas by its data-node-id or CSS selector.",
+      inputSchema: z.object({
+        artboardId: z.string().optional().describe("Target Artboard ID (defaults to active/selected artboard)"),
+        selector: z.string().describe("Target node's data-node-id (e.g. 'node_3') or CSS selector (e.g. 'button.cta', 'h2')"),
+        styles: z.record(z.string(), z.string()).describe("CSS key-value pairs to apply (e.g. { 'background-color': '#6965db', 'border-radius': '12px' })"),
+        textContent: z.string().optional().describe("Optional new text content for the matched element"),
+      }),
+      annotations: { readOnlyHint: false },
+    },
+    async ({ artboardId, selector, styles, textContent }): Promise<CallToolResult> => {
+      try {
+        if (onBroadcast) {
+          await onBroadcast({
+            type: "update_node_styles",
+            artboardId,
+            selector,
+            styles,
+            textContent,
+          });
+        }
+        return {
+          content: [{
+            type: "text",
+            text: `Düğüm stilleri güncellendi: ${selector}`,
+          }],
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text", text: `Stil güncellenemedi: ${(err as Error).message}` }],
+          isError: true,
+        };
+      }
+    },
+  );
+
+  server.registerTool(
+    "export_design_code",
+    {
+      title: "Export Standalone HTML/CSS from Design Canvas",
+      description: "Exports clean, standalone HTML and CSS code for a target Artboard (or all artboards) on the Design Canvas.",
+      inputSchema: z.object({
+        artboardId: z.string().optional().describe("Optional Artboard ID to export (defaults to selected/first artboard)"),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ artboardId }): Promise<CallToolResult> => {
+      try {
+        const res = await fetch("http://localhost:3001/api/canvas-context");
+        if (res.ok) {
+          const data = await res.json();
+          const artboards = Array.isArray(data.artboards) ? data.artboards : [];
+          const target =
+            (artboardId && artboards.find((a: any) => a.id === artboardId)) ||
+            (data.selectedArtboardId && artboards.find((a: any) => a.id === data.selectedArtboardId)) ||
+            artboards[0];
+          if (!target) {
+            return {
+              content: [{ type: "text", text: "Dışa aktarılacak bir tasarım bulunamadı." }],
+            };
+          }
+          const standalone = `<!DOCTYPE html>\n<html lang="tr">\n<head>\n  <meta charset="UTF-8" />\n  <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n  <title>${target.name || "Design"}</title>\n  <style>\n    *, *::before, *::after { box-sizing: border-box; }\n    body { margin: 0; font-family: system-ui, -apple-system, sans-serif; }\n    ${target.css || ""}\n  </style>\n</head>\n<body>\n${target.html || ""}\n</body>\n</html>`;
+          return {
+            content: [{ type: "text", text: standalone }],
+          };
+        }
+      } catch {}
+      return {
+        content: [{ type: "text", text: "Tasarım kodu alınamadı." }],
+        isError: true,
+      };
+    },
+  );
+
   // Tool 3: clear_canvas (Clears live canvas)
   // ============================================================
   server.registerTool(
